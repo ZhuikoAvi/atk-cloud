@@ -1,0 +1,73 @@
+# Облако Avito Toolkit Pro на GitHub — бесплатно для открытого репозитория (минуты Actions не ограничены).
+# Каждые 5 минут (GitHub иногда запускает с опозданием на несколько минут):
+#   • расписание ставок и контроль лимитов всех задач из jobs/ (их присылает программа, всё зашифровано);
+#   • копия фидов автозагрузки на GitHub Pages: https://<владелец>.github.io/<репозиторий>/feed/<id>.xml
+# Рабочее состояние — в ветке state (одна перезаписываемая запись), фиды — в ветке pages.
+# Нужен один секрет: Settings → Secrets and variables → Actions → New repository secret → ATK_VAULT_KEY
+# (ключ показывает программа: «Ставки» → «Облако на GitHub…»).
+
+name: Облако
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["jobs/**", "feeds.json"]
+
+concurrency:
+  group: cloud
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Ветки state и pages
+        run: |
+          for b in state pages; do
+            if git ls-remote --exit-code --heads origin "$b" >/dev/null 2>&1; then
+              git fetch -q --depth=1 origin "$b:$b"
+              git worktree add -q "_$b" "$b"
+            else
+              git worktree add -q --detach "_$b"
+              (cd "_$b" && git checkout -q --orphan "$b" && git rm -rfq . 2>/dev/null || true)
+            fi
+          done
+      - name: Ставки и фиды
+        env:
+          ATK_VAULT_KEY: ${{ secrets.ATK_VAULT_KEY }}
+          ATK_JOBS_DIR: jobs
+          ATK_STATE_DIR: _state/state
+          ATK_FEEDS_LIST: feeds.json
+          ATK_PAGES_DIR: _pages
+        run: node runner/run.mjs
+      - name: Сохранить
+        run: |
+          git config --global user.name "atk-cloud"
+          git config --global user.email "atk-cloud@users.noreply.github.com"
+          for b in state pages; do
+            cd "_$b"
+            git add -A
+            if ! git diff --cached --quiet; then
+              # одна запись на ветку: история не растёт
+              if git rev-parse -q --verify HEAD >/dev/null; then git commit -q --amend -m "$b"; else git commit -q -m "$b"; fi
+              git push -q -f origin "$b"
+            fi
+            cd ..
+          done
+          # задачи, которые программа выключила и облако закончило (вернуло ставки), — убрать файл настроек
+          git add -A jobs
+          if ! git diff --cached --quiet; then
+            git commit -q -m "Облако: задача удалена"
+            git pull -q --rebase origin main && git push -q origin HEAD:main
+          fi
