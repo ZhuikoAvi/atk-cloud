@@ -1,16 +1,16 @@
 # Облако Avito Toolkit Pro на GitHub — бесплатно для открытого репозитория (минуты Actions не ограничены).
-# Каждые 5 минут (GitHub иногда запускает с опозданием на несколько минут):
 #   • расписание ставок и контроль лимитов всех задач из jobs/ (их присылает программа, всё зашифровано);
-#   • копия фидов автозагрузки на GitHub Pages: https://<владелец>.github.io/<репозиторий>/feed/<id>.xml
-# Рабочее состояние — в ветке state (одна перезаписываемая запись), фиды — в ветке pages.
-# Нужен один секрет: Settings → Secrets and variables → Actions → New repository secret → ATK_VAULT_KEY
-# (ключ показывает программа: «Ставки» → «Облако на GitHub…»).
+#   • копии фидов автозагрузки с фото на GitHub Pages: https://<владелец>.github.io/<репозиторий>/feed/<id>.xml
+# GitHub запускает задачи «по расписанию» неравномерно (бывает — раз в час-два), поэтому один запуск работает
+# ~50 минут и сам делает проход каждые 5 минут, сохраняя состояние после каждого; следующий запуск подхватывает.
+# Рабочее состояние — в ветке state, копии фидов и фото — в ветке pages (по одной перезаписываемой записи).
+# Нужен один секрет: Settings → Secrets and variables → Actions → ATK_VAULT_KEY (ключ показывает программа).
 
 name: Облако
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch:
   push:
     branches: [main]
@@ -26,7 +26,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -43,7 +43,9 @@ jobs:
               (cd "_$b" && git checkout -q --orphan "$b" && git rm -rfq . 2>/dev/null || true)
             fi
           done
-      - name: Ставки и фиды
+          git config --global user.name "atk-cloud"
+          git config --global user.email "atk-cloud@users.noreply.github.com"
+      - name: Ставки и фиды — каждые 5 минут, ~50 минут
         env:
           ATK_VAULT_KEY: ${{ secrets.ATK_VAULT_KEY }}
           ATK_JOBS_DIR: jobs
@@ -51,24 +53,25 @@ jobs:
           ATK_FEEDS_LIST: feeds.json
           ATK_PAGES_DIR: _pages
           ATK_PAGES_BASE: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
-        run: node runner/run.mjs
-      - name: Сохранить
         run: |
-          git config --global user.name "atk-cloud"
-          git config --global user.email "atk-cloud@users.noreply.github.com"
-          for b in state pages; do
-            cd "_$b"
-            git add -A
-            if ! git diff --cached --quiet; then
-              # одна запись на ветку: история не растёт
-              if git rev-parse -q --verify HEAD >/dev/null; then git commit -q --amend -m "$b"; else git commit -q -m "$b"; fi
-              git push -q -f origin "$b"
+          start=$(date +%s)
+          save() {  # одна запись на ветку: история не растёт
+            for b in state pages; do
+              (cd "_$b" && git add -A && if ! git diff --cached --quiet; then
+                 if git rev-parse -q --verify HEAD >/dev/null; then git commit -q --amend -m "$b"; else git commit -q -m "$b"; fi
+                 git push -q -f origin "$b" || echo "не удалось сохранить ветку $b"
+               fi)
+            done
+            git add -A jobs
+            if ! git diff --cached --quiet; then  # задачи, выключенные программой и законченные облаком
+              git commit -q -m "Облако: задача удалена"
+              git pull -q --rebase origin main && git push -q origin HEAD:main || true
             fi
-            cd ..
+          }
+          while :; do
+            git pull -q --rebase origin main || true   # новые задачи и «Проверить сейчас» из программы
+            node runner/run.mjs || echo "проход завершился с ошибкой"
+            save
+            [ $(( $(date +%s) - start )) -gt 2900 ] && break
+            sleep $(( 300 - $(date +%s) % 300 + 5 ))      # до следующей «круглой» пятиминутки
           done
-          # задачи, которые программа выключила и облако закончило (вернуло ставки), — убрать файл настроек
-          git add -A jobs
-          if ! git diff --cached --quiet; then
-            git commit -q -m "Облако: задача удалена"
-            git pull -q --rebase origin main && git push -q origin HEAD:main
-          fi

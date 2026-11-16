@@ -11,6 +11,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { seal, open } from "./netlify/lib/bids.mjs";
 
 const JOBS = process.env.ATK_JOBS_DIR || path.join(process.cwd(), "jobs");     // ветка main
@@ -23,7 +24,8 @@ const gone = new Set();     // удалённые ключи
 const cfgs = new Map();     // id → настройки задачи
 let loaded = false;
 
-const fname = (key) => encodeURIComponent(key).replace(/%/g, "_") + ".json";
+// имя файла — хэш ключа: ключи бывают длинными (текст уведомления) — длинное имя роняло запись состояния
+const fname = (key) => createHash("sha256").update(key).digest("hex").slice(0, 40) + ".json";
 
 async function readBox(file, aad) {
   try {
@@ -38,13 +40,14 @@ export async function load() {
   if (loaded) return;
   loaded = true;
   fs.mkdirSync(STATE, { recursive: true });
-  // рабочее состояние: имена файлов — закодированные ключи; ключ записан и внутри (поле k)
+  // рабочее состояние: имя файла — хэш ключа; сам ключ (в нём бывает текст уведомления) — внутри шифра
   for (const f of fs.existsSync(STATE) ? fs.readdirSync(STATE) : []) {
     if (!f.endsWith(".json")) continue;
-    let box;
-    try { box = JSON.parse(fs.readFileSync(path.join(STATE, f), "utf8")); } catch (e) { continue; }
-    if (!box || !box.k) continue;
-    try { mem.set(box.k, await open(box, "state:" + box.k)); } catch (e) { /* чужой ключ шифрования — пропуск */ }
+    try {
+      const box = JSON.parse(fs.readFileSync(path.join(STATE, f), "utf8"));
+      const { k, v } = await open(box, "state");
+      if (k) mem.set(k, v);
+    } catch (e) { /* испорчен или чужой ключ шифрования — пропуск */ }
   }
   // настройки задач от программы
   for (const f of fs.existsSync(JOBS) ? fs.readdirSync(JOBS) : []) {
@@ -119,8 +122,8 @@ export async function save() {
       delete val.tg;
       if (!val.force && cfgs.get(id)) val.force_done = cfgs.get(id).force_at || val.force_done || "";
     }
-    const box = await seal(val, "state:" + key);
-    fs.writeFileSync(path.join(STATE, fname(key)), JSON.stringify({ k: key, ...box }));
+    const box = await seal({ k: key, v: val }, "state");
+    fs.writeFileSync(path.join(STATE, fname(key)), JSON.stringify(box));
   }
   for (const key of gone) {
     try { fs.unlinkSync(path.join(STATE, fname(key))); } catch (e) { /* уже нет */ }
