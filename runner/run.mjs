@@ -26,7 +26,7 @@ if (!process.env.ATK_VAULT_KEY) {
 }
 try {
   const r = await mirrorFeeds();
-  console.log(`фиды: ${r.ok} из ${r.total} обновлены`);
+  console.log(`фиды: ${r.ok} из ${r.total} обновлены; фото скачано ${r.photos || 0}, ждут ${r.waiting || 0}`);
 } catch (e) {
   console.log("фиды: ошибка —", String(e && e.message || e).slice(0, 120));
 }

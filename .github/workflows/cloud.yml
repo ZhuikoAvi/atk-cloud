@@ -26,7 +26,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -50,6 +50,7 @@ jobs:
           ATK_STATE_DIR: _state/state
           ATK_FEEDS_LIST: feeds.json
           ATK_PAGES_DIR: _pages
+          ATK_PAGES_BASE: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
         run: node runner/run.mjs
       - name: Сохранить
         run: |
