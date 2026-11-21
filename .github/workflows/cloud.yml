@@ -1,8 +1,10 @@
 # Облако Avito Toolkit Pro на GitHub — бесплатно для открытого репозитория (минуты Actions не ограничены).
 #   • расписание ставок и контроль лимитов всех задач из jobs/ (их присылает программа, всё зашифровано);
 #   • копии фидов автозагрузки с фото на GitHub Pages: https://<владелец>.github.io/<репозиторий>/feed/<id>.xml
-# GitHub запускает задачи «по расписанию» неравномерно (бывает — раз в час-два), поэтому один запуск работает
-# ~50 минут и сам делает проход каждые 5 минут, сохраняя состояние после каждого; следующий запуск подхватывает.
+# GitHub запускает задачи «по расписанию» очень неравномерно (бывало — раз в 5–8 часов), поэтому облако работает
+# непрерывно: один запуск идёт ~5 ч 45 мин (GitHub разрешает до 6 ч) и делает проход каждые 5 минут, а в конце сам
+# запускает следующий. Расписание ниже — только запасной «будильник», если цепочка оборвалась.
+# Изменения из программы («Проверить сейчас», новые настройки) подхватываются за ~20 секунд.
 # Рабочее состояние — в ветке state, копии фидов и фото — в ветке pages (по одной перезаписываемой записи).
 # Нужен один секрет: Settings → Secrets and variables → Actions → ATK_VAULT_KEY (ключ показывает программа).
 
@@ -22,11 +24,12 @@ concurrency:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 358
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -45,7 +48,7 @@ jobs:
           done
           git config --global user.name "atk-cloud"
           git config --global user.email "atk-cloud@users.noreply.github.com"
-      - name: Ставки и фиды — каждые 5 минут, ~50 минут
+      - name: Ставки и фиды — проход каждые 5 минут, ~5 ч 45 мин
         env:
           ATK_VAULT_KEY: ${{ secrets.ATK_VAULT_KEY }}
           ATK_JOBS_DIR: jobs
@@ -72,6 +75,21 @@ jobs:
             git pull -q --rebase origin main || true   # новые задачи и «Проверить сейчас» из программы
             node runner/run.mjs || echo "проход завершился с ошибкой"
             save
-            [ $(( $(date +%s) - start )) -gt 2900 ] && break
-            sleep $(( 300 - $(date +%s) % 300 + 5 ))      # до следующей «круглой» пятиминутки
+            [ $(( $(date +%s) - start )) -gt 20700 ] && break
+            # ждём до следующей «круглой» пятиминутки, но раз в 20 секунд смотрим, не прислала ли программа изменения
+            until=$(( ( $(date +%s) / 300 + 1 ) * 300 + 5 ))
+            while [ $(date +%s) -lt $until ]; do
+              sleep 20
+              remote=$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)
+              if [ -n "$remote" ] && ! { git cat-file -e "$remote^{commit}" 2>/dev/null &&
+                                         git merge-base --is-ancestor "$remote" HEAD; }; then break; fi
+            done
           done
+      - name: Следующий запуск — сразу, без ожидания расписания GitHub
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ls jobs/*.json >/dev/null 2>&1 || grep -q '[A-Za-z0-9_-]\{20,\}' feeds.json 2>/dev/null; then
+            gh workflow run cloud.yml --ref main -R "${{ github.repository }}" || echo "не удалось запустить следующий — запустит расписание"
+          fi

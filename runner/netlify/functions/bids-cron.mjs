@@ -25,6 +25,10 @@ export default async () => {
     const id = bl.key.slice(4);
     let job = await st.get(bl.key, { type: "json" });
     if (!job) continue;
+    if (job.moved) {  // облако аккаунта переехало (на GitHub) — эту задачу удаляем, ставки не трогаем
+      await st.delete(bl.key);
+      continue;
+    }
     let did = false;
     try {
       did = await runJob(id, job, t0);
@@ -71,7 +75,11 @@ async function runJob(id, job, t0) {
       if (want === "out") {
         const items = await activeItems(await token());
         const pr = await promotions(await token(), items.map((i) => i.id));
-        job.saved = job.saved || {};
+        // запоминаем только то, что стоит сейчас: старые, так и не вернувшиеся ставки не «воскрешаем» (раньше они
+        // копились и утром возвращались вместе с новыми). Кроме тех, что как раз ждут возврата в очереди.
+        const pending = new Set((job.queue || []).filter((q) => q.op === "restore").map((q) => String(q.id)));
+        job.saved = Object.fromEntries(Object.entries(job.saved || {}).filter(([k]) => pending.has(k)));
+        job.queue = (job.queue || []).filter((q) => q.op !== "restore");
         let n = 0;
         for (const it of items) {
           const man = (pr[it.id] || {}).manualPromotion;
@@ -86,9 +94,9 @@ async function runJob(id, job, t0) {
         if (n) await tgSend(tg, `⏰ ${job.name || "Ставки"}: вне расписания — ${n} ставок ${sc.out === "off" ?
           "отключаются" : "снижаются"}, вернутся в начале окна.`);
       } else {
-        const ids = Object.keys(job.saved || {});
         job.queue = (job.queue || []).filter((q) => q.op === "restore");
-        for (const i of ids) job.queue.push({ id: +i, op: "restore" });
+        const ids = await restorable(job, sc, token, t, tg);
+        for (const i of ids) if (!job.queue.some((q) => String(q.id) === i)) job.queue.push({ id: +i, op: "restore" });
         if (ids.length) {
           pushLog(job, "info", `${t.hhmm} — начало окна: возвращаю ставки — ${ids.length}`);
           await tgSend(tg, `⏰ ${job.name || "Ставки"}: начало рабочего окна — возвращаю ${ids.length} ставок.`);
@@ -98,9 +106,9 @@ async function runJob(id, job, t0) {
     } else if (want === "in" && Object.keys(job.saved || {}).length &&
                !(job.queue || []).some((q) => q.op === "restore")) {
       // окно уже идёт, а часть ставок так и не вернулась (сбой при возврате) — ставим их на возврат снова
-      const ids = Object.keys(job.saved);
+      const ids = await restorable(job, sc, token, t, tg);
       job.queue = (job.queue || []).concat(ids.map((i) => ({ id: +i, op: "restore" })));
-      pushLog(job, "info", `${t.hhmm} — не вернулись ставки: ${ids.length} — возвращаю снова`);
+      if (ids.length) pushLog(job, "info", `${t.hhmm} — не вернулись ставки: ${ids.length} — возвращаю снова`);
     }
   }
 
@@ -177,6 +185,42 @@ async function runJob(id, job, t0) {
     }
   }
   return true;
+}
+
+// Что вернуть в начале окна. Сначала смотрим, что стоит на аккаунте сейчас:
+//   • вы уже поставили ставки вручную (на объявлениях, которых нет среди запомненных) — старые НЕ возвращаем
+//     совсем: иначе к вашим 8–9 добавились бы вчерашние и продвигалось бы 15 объявлений;
+//   • на запомненном объявлении сейчас уже стоит ставка (вы поставили сами) — его не трогаем;
+//   • объявление снято / не активно — забываем.
+// При снижении «до минимальной / до %» запомненные объявления остаются со сниженной ставкой — их возвращаем, если
+// ставка всё ещё ниже запомненной.
+async function restorable(job, sc, token, t, tg) {
+  const saved = job.saved || {};
+  const ids = Object.keys(saved);
+  if (!ids.length) return [];
+  const items = await activeItems(await token());
+  const pr = await promotions(await token(), items.map((i) => i.id));
+  const live = new Set(items.map((i) => String(i.id)));
+  const bidNow = (i) => (((pr[i] || {}).manualPromotion || {}).bidPenny) || 0;
+  const foreign = items.filter((i) => bidNow(i.id) && !(String(i.id) in saved));
+  if (foreign.length && (sc.out || "off") === "off") {
+    job.saved = {};
+    pushLog(job, "info", `${t.hhmm} — начало окна: на аккаунте уже стоят ваши ставки (${foreign.length}) — ` +
+      `старые (${ids.length}) не возвращаю`);
+    await tgSend(tg, `⏰ ${job.name || "Ставки"}: начало окна — вы уже поставили ставки вручную (${foreign.length}), ` +
+      `старые ${ids.length} не возвращаю.`);
+    return [];
+  }
+  const out = [];
+  for (const i of ids) {
+    const now = bidNow(+i);
+    if (!live.has(i) || (now && now >= saved[i].bid) || ((sc.out || "off") === "off" && now)) {
+      delete saved[i];
+      continue;
+    }
+    out.push(i);
+  }
+  return out;
 }
 
 async function snap(id, tok, t) {

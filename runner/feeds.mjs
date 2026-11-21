@@ -117,7 +117,12 @@ export async function mirrorFeeds() {
     if (!ids.includes(f.replace(/\.xml$/, ""))) fs.unlinkSync(path.join(out, "feed", f));
   }
   const waiting = need.size - got;
-  fs.writeFileSync(path.join(out, "status.json"), JSON.stringify({ feeds: ok, photos: exts.size, waiting,
-    at: new Date().toISOString() }));
+  // status.json — только когда что-то изменилось: каждая запись в ветку pages — это сборка GitHub Pages, а их
+  // разрешено около 10 в час (облако делает проход каждые 5 минут)
+  const sp = path.join(out, "status.json");
+  let prev = {};
+  try { prev = JSON.parse(fs.readFileSync(sp, "utf8")); } catch (e) { /* нет — запишем */ }
+  if (prev.feeds !== ok || prev.photos !== exts.size || prev.waiting !== waiting)
+    fs.writeFileSync(sp, JSON.stringify({ feeds: ok, photos: exts.size, waiting, at: new Date().toISOString() }));
   return { ok, total: ids.length, photos: got, waiting };
 }
